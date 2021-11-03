@@ -1,12 +1,25 @@
 import datetime
 import numbers
 import logging
+from typing import Dict, List, Type
+
 from influxdb_client import InfluxDBClient
 #from functools32 import lru_cache
 from pyslet.iso8601 import TimePoint
+from pyslet.odata2.core import (
+    EntityCollection,
+    CommonExpression,
+    PropertyExpression,
+    BinaryExpression, 
+    LiteralExpression,
+    Operator,
+    SystemQueryOption,
+    format_expand,
+    format_select,
+    ODataURI,
+)
+from pyslet.odata2.csdl import EntityContainer, EntitySet
 import pyslet.rfc2396 as uri
-from pyslet.odata2.core import EntityCollection, CommonExpression, PropertyExpression, BinaryExpression, \
-    LiteralExpression, Operator, SystemQueryOption, format_expand, format_select, ODataURI
 
 import sys
 if sys.version_info[0] >= 3:
@@ -40,7 +53,9 @@ class InfluxDBEntityContainer(object):
         dict with connection configuration
         format : {url:"http://localhost:9999", token:"my-token", org:"my-org"}
     """
-    def __init__(self, container, connection, topmax, **kwargs):
+    def __init__(
+        self, container: EntityContainer, connection: Dict[str, str], topmax: int, **kwargs
+    ):
         self.container = container
         try:
             self.client = InfluxDBClient(url=connection['url'], token=connection['token'], org=connection["org"])
@@ -53,10 +68,10 @@ class InfluxDBEntityContainer(object):
             logger.info("Failed to connect to initialize Influx Odata container")
             logger.exception(str(e))
 
-    def bind_entity_set(self, entity_set):
+    def bind_entity_set(self, entity_set: EntitySet) -> None:
         entity_set.bind(self.get_collection_class(), container=self)
 
-    def get_collection_class(self):
+    def get_collection_class(self) -> Type["InfluxDBMeasurement"]:
         return InfluxDBMeasurement
 
 
@@ -74,8 +89,8 @@ def unmangle_bucket_name(bucket):
     bucket = bucket.replace('_dsh_', '-')
     return bucket
 
-def unmangle_field_name(field_name):
-    return field_name
+def unmangle_field_name(field_name: str) -> str:
+    #return field_name
     return field_name.replace('_sp_', ' ').replace('_dot_','.').strip()
 
 def unmangle_entity_set_name(name):
@@ -85,7 +100,7 @@ def unmangle_entity_set_name(name):
     return bucket, measurement
 
 
-def parse_influxdb_time(t_str):
+def parse_influxdb_time(t_str: str) -> datetime.datetime:
     """
     returns a `datetime` object (some precision from influxdb may be lost)
     :type t_str: str
@@ -102,7 +117,7 @@ class InfluxDBMeasurement(EntityCollection):
 
     name should be "database.measurement"
     """
-    def __init__(self, container, **kwargs):
+    def __init__(self, container: InfluxDBEntityContainer, **kwargs):
         super(InfluxDBMeasurement, self).__init__(**kwargs)
         self.container = container
         self.bucket_name, self.measurement_name = unmangle_entity_set_name(self.entity_set.name)
@@ -180,6 +195,10 @@ class InfluxDBMeasurement(EntityCollection):
         |> yield()'
 
         """
+        # In English, turn unique field names into columns of their own and
+        # store the value in these new columns. Omit the measurement name and
+        # time-range colums from the output. This reduces the number of rows to
+        # return.
 
         q = u'from(bucket:"{}") ' \
             u'{}' \
@@ -209,11 +228,13 @@ class InfluxDBMeasurement(EntityCollection):
                 record.__delitem__('result')
                 e = self.new_entity()
                 t = record['_time']      # flux client returns datetime object, no need to format
+                # `e` is an Entity. Objects returned by its __getitem__ method
+                # have a (sub)type of pyslet.odata2.csml.EDMValue
                 e["timestamp"].set_from_value(t)
                 for field, value in record.items():
                     try:
                         e[unmangle_field_name(field)].set_from_value(value)
-                    except:
+                    except Exception:
                         # in case if field in query result doesn't exists in metadata schema, SKIP the field
                         continue
                 e.exists = True
@@ -225,10 +246,17 @@ class InfluxDBMeasurement(EntityCollection):
 
         def fetch_all_keys():
             # fetch all columns in metadata (ie schema xml). Includes both _fields and tags
-            entitySet_name = str(self.get_location())
-            entitySet_name = entitySet_name.split("/")[-1]
-            _entityDict = getattr(self.container, '_entityDict', {})
-            return _entityDict[entitySet_name]
+            entitySet_name = str(self.get_location()).split("/")[-1]  # eg "cml_diagnostics__nodes"
+            # Originally looked up self.container._entityDict, but this attr
+            # doesn't exist _ever_ afaict. Since the intent seems to have been
+            # to get the list of properties from the model, we'll generate that
+            # list here from the EntityType.
+            properties: List[str] = [
+                prop for prop in
+                self.container.container[entitySet_name].entityType.keys()
+                if prop != "timestamp"
+            ]
+            return properties
 
         if self.select is None or '*' in self.select:
             return '|'.join(unmangle_field_name(str(k)) for k in fetch_all_keys())
@@ -236,7 +264,7 @@ class InfluxDBMeasurement(EntityCollection):
             return '|'.join(str(k).replace('__', ' ').strip() for k in self.select.keys() if k != u'timestamp')
 
 
-    def _range_expression(self):
+    def _range_expression(self) -> str:
         """generates a valid InfluxDB2 range query part from the parsed filter (set with self.set_filter)"""
         # using filter expression to define the time range of the query
         # In influx2, range query is in the format
@@ -244,11 +272,16 @@ class InfluxDBMeasurement(EntityCollection):
         # range(start: -12h, stop: -15m)
         # with stop parameter being optional
         if self.filter is None:
-            return u''
+            # Originally, this returned ''. Tableau's OData connector, however,
+            # seems to think it's a multi-connection, extract-only data source
+            # and disallows modifying the query before extracting the data. So,
+            # I'm hardcoding a 90d relative range, as this is the largest finite
+            # retention period and long enough for my use-case.
+            return u'|> range(start: -90d)'
         exp = (self._sql_where_expression(self.filter)).replace('AND',',').split(',')
         return u'|> range({})'.format(u' , '.join([(i.replace('"','').replace("'",'')) for i in exp if "start" in i or "stop" in i]))
 
-    def _tag_filter_expression(self):
+    def _tag_filter_expression(self) -> str:
         # generates tag filters
         if self.filter is None:
             return u''
@@ -266,7 +299,7 @@ class InfluxDBMeasurement(EntityCollection):
         # currently supports only "AND: operator
         return u'|> filter(fn: (r) => {})'.format(u' and '.join(formatted_tags))
 
-    def _sql_where_expression(self, filter_expression):
+    def _sql_where_expression(self, filter_expression) -> str:
         if filter_expression is None:
             return ''
         elif isinstance(filter_expression, BinaryExpression):

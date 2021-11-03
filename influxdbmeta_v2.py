@@ -1,6 +1,7 @@
 from itertools import chain
+from typing import Any, Dict, List, Tuple, cast
 
-from influxdb_client import InfluxDBClient
+from influxdb_client import InfluxDBClient, QueryApi
 
 xml_head = """<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
 <edmx:Edmx Version="1.0" xmlns:edmx="http://schemas.microsoft.com/ado/2007/06/edmx"
@@ -49,11 +50,22 @@ def bucket_name__measurement_name(bucket_name, m_name):
         mangle_bucket_name(bucket_name),
         mangle_measurement_name(m_name)
     )
+
+
 def mangle_field_name(field_name):
     return field_name.replace(' ', '_sp_').replace('.', '_dot_')
 
 class InfluxDB(object):
-    def __init__(self, connection):
+    client: InfluxDBClient
+    min_timerange: str  # ex: "90d"
+    buckets: List[str]
+    query_api: QueryApi
+
+    def __init__(self, connection: Dict[str, str]):
+        """
+        Args:
+            connection (dict): From ConfigParser._sections['influxdb2']
+        """
         try:
             timerange = int(connection['data_availability_timerange'])
         except:
@@ -77,7 +89,7 @@ class InfluxDB(object):
             print("Bucket details not valid")
             raise ValueError()
 
-    def fields(self, bucket, measurement):
+    def fields(self, bucket, measurement) -> Tuple[Dict[str, str], ...]:
         """returns a tuple of dicts where each dict has attributes (name, type, edm_type)"""
 
         fields_query = 'from (bucket: "{}") \
@@ -102,8 +114,8 @@ class InfluxDB(object):
 
         fields_rs = self.query_api.query(fields_query)
         tags_rs = self.query_api.query(tags_query)
-        fields = []
-        tags = []
+        fields: List[Tuple[Any, str]] = []
+        tags: List[Tuple[Any, str]] = []
         try:
             fields = [(_f.values['_value'], 'float') for _f in fields_rs[0].records]
         except:
@@ -117,15 +129,14 @@ class InfluxDB(object):
         # tags_rs = self.client.query('SHOW TAG KEYS', database=db_name)
         # expand and deduplicate
         #fields = set(tuple(f.items()) for f in chain(*chain(fields_rs, tags_rs)))
-        fields = (dict(
+        return tuple(dict(
             name= mangle_field_name(f[0]),
             type=f[1],
             edm_type=get_edm_type(f[1])
         ) for f in fields)
-        return tuple(fields)
 
     @property
-    def measurements(self):
+    def measurements(self) -> List[str]:
         measurements = []
 
         for each_bucket in self.buckets:

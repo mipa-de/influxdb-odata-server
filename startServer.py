@@ -23,20 +23,20 @@ logger.setLevel(logging.DEBUG)
 class Request(BaseRequest, AuthorizationMixin):
     pass
 
-def get_config(config):
+def get_config(config: str) -> ConfigParser:
     c = ConfigParser(allow_no_value=True)
     with open(config, 'r') as fp:
         #c = get_sample_config()
         c.read_file(fp)
     return c
 
-
 class prepareHTTPProxy(object):
-    def __init__(self, app):
+    def __init__(self, app: ReadOnlyServer):
         self.wrapped = app
 
     def __call__(self, environ, start_response):
         local.request = req = Request(environ)
+        # calls Server.__call__
         return self.wrapped(environ, start_response)
 
 
@@ -82,7 +82,7 @@ class Auth():
         _, encoded = header.split(None, 1)
         decoded = b64decode(encoded).decode('UTF-8')
         username, password = decoded.split(':', 1)
-        return self.authentication_client.password_verify(username, password) #self.awscognito_auth(username, password)
+        return self.authentication_client.password_verify(username, password)
 
     def _failed(self, environ, start_response):
         start_response('401 Authentication Required',
@@ -91,7 +91,7 @@ class Auth():
         yield b'Authentication error. Make sure username/password or tokens are correct'
 
 
-def load_metadata(config):
+def load_metadata(config: ConfigParser) -> edmx.Document:
     """Regenerate and load the metadata file and connects the InfluxDBEntityContainer."""
     metadata_filename = config.get('metadata', 'metadata_file')
     influxdb_version = config.getint('metadata', 'influxdb_version')
@@ -103,11 +103,12 @@ def load_metadata(config):
     doc = edmx.Document()
     with open(metadata_filename, 'rb') as f:
         doc.read_from_stream(f)
-    container = doc.root.DataServices['InfluxDBSchema.InfluxDB']
+
+    container = doc.root.DataServices['InfluxDBSchema.InfluxDB']  # type: ignore
 
     if influxdb_version == 2:
         from influxdbds_v2 import InfluxDBEntityContainer
-        conn = dict(config._sections['influxdb2'])
+        conn = dict(config._sections['influxdb2'])  # type: ignore
         InfluxDBEntityContainer(container=container, connection=conn, topmax=topmax)
     else:
         from influxdbds import InfluxDBEntityContainer
@@ -137,7 +138,7 @@ def createSchemaMetadata(config):
         logger.exception("Failed to create Odata provider metadata due to following error : {}".format(str(e)))
         return False
 
-def configure_app(c, doc):
+def configure_app(c: ConfigParser, doc) -> ReadOnlyServer:
     service_root = c.get('server', 'service_advertise_root')
     logger.info("Advertising service at %s" % service_root)
     app = ReadOnlyServer(serviceRoot=service_root)
@@ -173,7 +174,9 @@ if __name__ == "__main__":
     app = local_manager.make_middleware(app)
 
     if c.getboolean('authentication', 'required'):
-        auth_config = c._sections["authentication"]
+        # the _sections attr is added after init and apparently doesn't exist
+        # until one of the read() methods is called.
+        auth_config = c._sections["authentication"]  # type: ignore
         app = Auth(app, auth_config)
 
     from werkzeug.serving import run_simple
