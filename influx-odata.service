@@ -1,0 +1,21 @@
+[Unit]
+Description=OData Adapter for InfluxDB
+After=nginx.service
+
+[Service]
+User=nginx
+Group=nginx
+WorkingDirectory=/usr/share/nginx/influx-odata-server
+ExecStart=/usr/bin/python3.8 startServer.py
+#Restart=on-failure
+Environment=PYTHONUNBUFFERED=1
+KillSignal=SIGQUIT
+Type=simple
+StandardError=journal
+StandardOutput=journal
+NotifyAccess=all
+SELinuxContext=system_u:system_r:httpd_sys_script_t:s0
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

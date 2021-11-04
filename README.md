@@ -32,6 +32,19 @@ separating each by comma(,)
 Once the metadata file is generated, spin up the Odata server by 
 `python startServer.py -c settings.conf`
 
+### Optional Systemd Service
+
+You may wish to install the influx-odata.service file and run this on
+system start. Note that the file currently is configured for use with
+NGINX, python3.8, and Centos8, so modify accordingly.
+
+If you use SELinux, you will need to enable the `httpd_can_network_connect`
+and `nis_enabled` booleans. You may also need to adjust the labels and
+generate some policy modules. In my case, I needed policies for
+`transition`, `search`, `nnp_transition`, and `entrypoint` before Python
+was able to start under Systemd. A similar hurdle likely exists for
+AppArmor.
+
 
 ## Supported features
 * Odata 2 provider (server) implemetation.
